@@ -414,12 +414,30 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_show_with_seats: {
+        Args: {
+          p_base_price: number
+          p_movie_id: string
+          p_screen_id: string
+          p_start_time: string
+        }
+        Returns: string
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
           _user_id: string
         }
         Returns: boolean
+      }
+      seed_show_with_seats: {
+        Args: {
+          p_base_price: number
+          p_movie_id: string
+          p_screen_id: string
+          p_start_time: string
+        }
+        Returns: string
       }
     }
     Enums: {
