@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Download } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import {
+  getNowPlayingMovies,
+  getMovieDetails,
+} from "@/lib/api/tmdb.functions";
 
 export const Route = createFileRoute("/_authenticated/manager/movies")({
   component: ManagerMovies,
@@ -24,6 +28,171 @@ function ManagerMovies() {
     queryKey: ["mgr-movies-list"],
     queryFn: async () => (await supabase.from("movies").select("*").order("created_at", { ascending: false })).data ?? [],
   });
+  const importFromTMDB = async () => {
+  try {
+    toast.info("Fetching current movies from TMDB...");
+
+    const result = await getNowPlayingMovies();
+    const tmdbMovies = result.results ?? [];
+
+    if (tmdbMovies.length === 0) {
+      toast.error("No current movies found from TMDB");
+      return;
+    }
+
+    const moviesToInsert = tmdbMovies.map((movie: any) => ({
+      tmdb_id: movie.id,
+      title: movie.title,
+      description: movie.overview || null,
+      poster_url: movie.poster_path
+        ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+        : null,
+      backdrop_url: movie.backdrop_path
+        ? `https://image.tmdb.org/t/p/w1280${movie.backdrop_path}`
+        : null,
+      duration_minutes: 120,
+      genres: [],
+      languages: [],
+      certificate: null,
+      rating: Number(movie.vote_average || 0),
+      release_date: movie.release_date || null,
+      status: "now_showing" as const,
+    }));
+
+    const { error } = await supabase
+      .from("movies")
+      .upsert(moviesToInsert, {
+        onConflict: "tmdb_id",
+      });
+
+    if (error) {
+      console.error("TMDB import error:", error);
+      toast.error(error.message);
+      return;
+    }
+
+    toast.success(
+      `${moviesToInsert.length} current movies imported from TMDB`,
+    );
+
+    qc.invalidateQueries({ queryKey: ["mgr-movies-list"] });
+    qc.invalidateQueries({ queryKey: ["movies", "all"] });
+  } catch (error) {
+    console.error(error);
+    toast.error("Failed to import movies from TMDB");
+  }
+};
+const updateTMDBDetails = async () => {
+  try {
+    toast.info("Updating movie details from TMDB...");
+
+    const { data: tmdbMovies, error } = await supabase
+      .from("movies")
+      .select("id, tmdb_id")
+      .not("tmdb_id", "is", null);
+
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+
+    if (!tmdbMovies || tmdbMovies.length === 0) {
+      toast.error("No TMDB movies found in your database");
+      return;
+    }
+
+    let updated = 0;
+
+    for (const movie of tmdbMovies) {
+      if (!movie.tmdb_id) continue;
+
+      try {
+        const details = await getMovieDetails({
+  data: {
+    tmdbId: movie.tmdb_id,
+  },
+});
+
+        const indianReleaseDates =
+          details.release_dates?.results?.find(
+            (country: any) => country.iso_3166_1 === "IN",
+          );
+
+        const certificate =
+          indianReleaseDates?.release_dates?.find(
+            (release: any) => release.certification,
+          )?.certification || null;
+
+        const languages =
+          details.spoken_languages
+            ?.map((language: any) => language.english_name)
+            .filter(Boolean) || [];
+
+        const genres =
+          details.genres
+            ?.map((genre: any) => genre.name)
+            .filter(Boolean) || [];
+
+        const { error: updateError } = await supabase
+          .from("movies")
+          .update({
+            title: details.title,
+            description: details.overview || null,
+
+            poster_url: details.poster_path
+              ? `https://image.tmdb.org/t/p/w500${details.poster_path}`
+              : null,
+
+            backdrop_url: details.backdrop_path
+              ? `https://image.tmdb.org/t/p/w1280${details.backdrop_path}`
+              : null,
+
+            duration_minutes: details.runtime || 120,
+
+            genres,
+
+            languages:
+              languages.length > 0 ? languages : ["English"],
+
+            certificate: certificate || "UA",
+
+            rating: Number(details.vote_average || 0),
+
+            release_date: details.release_date || null,
+
+          })
+          .eq("id", movie.id);
+
+        if (updateError) {
+          console.error(
+            `Failed to update ${movie.id}:`,
+            updateError,
+          );
+        } else {
+          updated++;
+        }
+      } catch (error) {
+        console.error(
+          `Failed to fetch TMDB details for ${movie.tmdb_id}:`,
+          error,
+        );
+      }
+    }
+
+    toast.success(`${updated} movies updated with TMDB details`);
+
+    qc.invalidateQueries({
+      queryKey: ["mgr-movies-list"],
+    });
+
+    qc.invalidateQueries({
+      queryKey: ["movies", "all"],
+    });
+  } catch (error) {
+    console.error(error);
+    toast.error("Failed to update TMDB movie details");
+  }
+};
 
   const create = async () => {
     if (!form.title) return toast.error("Title required");
@@ -45,7 +214,21 @@ function ManagerMovies() {
 
   return (
     <div>
-      <div className="mb-4 flex justify-end">
+      <div className="mb-4 flex justify-end gap-3">
+  <Button
+    variant="outline"
+    onClick={importFromTMDB}
+  >
+    <Download className="mr-2 size-4" />
+    Import from TMDB
+  </Button>
+  <Button
+  variant="outline"
+  onClick={updateTMDBDetails}
+>
+  <Download className="mr-2 size-4" />
+  Update TMDB Details
+</Button>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
             <Button className="bg-gradient-to-r from-primary to-primary-glow shadow-glow"><Plus className="mr-2 size-4" /> Add movie</Button>

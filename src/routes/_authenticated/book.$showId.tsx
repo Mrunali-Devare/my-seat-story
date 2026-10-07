@@ -88,28 +88,94 @@ function BookPage() {
   const selectedSeats = seats.filter((s) => selected.has(s.id));
 
   const toggleSeat = async (seat: SeatRow) => {
-    if (!user) return;
-    if (selected.has(seat.id)) {
-      // unlock
-      const { error } = await supabase
-        .from("show_seats")
-        .update({ status: "available", locked_by: null, locked_until: null })
-        .eq("id", seat.id).eq("locked_by", user.id);
-      if (error) return toast.error("Could not release seat");
-      setSelected((prev) => { const n = new Set(prev); n.delete(seat.id); return n; });
-    } else {
-      if (selected.size >= 10) return toast.error("Max 10 seats per booking");
-      const until = new Date(Date.now() + LOCK_MINUTES * 60 * 1000).toISOString();
-      const { data, error } = await supabase
-        .from("show_seats")
-        .update({ status: "locked", locked_by: user.id, locked_until: until })
-        .eq("id", seat.id).eq("status", "available").select().maybeSingle();
-      if (error || !data) return toast.error("Seat just got taken");
-      setSelected((prev) => new Set(prev).add(seat.id));
-      setLockExpiry(Date.now() + LOCK_MINUTES * 60 * 1000);
+  if (!user) return;
+
+  if (selected.has(seat.id)) {
+    // Unlock the seat
+    const { data, error } = await supabase
+      .from("show_seats")
+      .update({
+        status: "available",
+        locked_by: null,
+        locked_until: null,
+      })
+      .eq("id", seat.id)
+      .eq("locked_by", user.id)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      console.error("UNLOCK SEAT ERROR:", error);
+      return toast.error(`Could not release seat: ${error.message}`);
     }
-    qc.invalidateQueries({ queryKey: ["seats", showId] });
-  };
+
+    if (!data) {
+      console.error("UNLOCK SEAT: no matching row", {
+        seatId: seat.id,
+        userId: user.id,
+      });
+      return toast.error("Could not release seat");
+    }
+
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(seat.id);
+      return next;
+    });
+  } else {
+    if (selected.size >= 10) {
+      return toast.error("Max 10 seats per booking");
+    }
+
+    const until = new Date(
+      Date.now() + LOCK_MINUTES * 60 * 1000,
+    ).toISOString();
+
+    const { data, error } = await supabase
+      .from("show_seats")
+      .update({
+        status: "locked",
+        locked_by: user.id,
+        locked_until: until,
+      })
+      .eq("id", seat.id)
+      .eq("status", "available")
+      .is("locked_by", null)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      console.error("LOCK SEAT ERROR:", error);
+
+      return toast.error(
+        `Could not select seat: ${error.message}`,
+      );
+    }
+
+    if (!data) {
+      console.error("LOCK SEAT: no matching available seat", {
+        seatId: seat.id,
+        userId: user.id,
+      });
+
+      return toast.error("Seat is no longer available");
+    }
+
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.add(seat.id);
+      return next;
+    });
+
+    setLockExpiry(
+      Date.now() + LOCK_MINUTES * 60 * 1000,
+    );
+  }
+
+  qc.invalidateQueries({
+    queryKey: ["seats", showId],
+  });
+};
 
   // Auto-release on timer
   useEffect(() => {

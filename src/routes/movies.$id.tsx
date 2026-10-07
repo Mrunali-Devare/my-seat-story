@@ -1,11 +1,14 @@
+import { AprioriRecommendations } from "@/components/movies/AprioriRecommendations";
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { Star, Clock, Calendar, Languages, MapPin, ArrowLeft } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { SiteHeader } from "@/components/site/SiteHeader";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatShowTimeOnly, formatShowDateOnly, inr } from "@/lib/format";
+import { MovieReviews } from "@/components/movies/MovieReviews";
 
 export const Route = createFileRoute("/movies/$id")({
   component: MoviePage,
@@ -19,6 +22,26 @@ export const Route = createFileRoute("/movies/$id")({
 
 function MoviePage() {
   const { id } = Route.useParams();
+  const [city, setCity] = useState(() => {
+  if (typeof window === "undefined") return "Mumbai";
+  return localStorage.getItem("city") || "Mumbai";
+});
+
+useEffect(() => {
+  const savedCity = localStorage.getItem("city") || "Mumbai";
+  setCity(savedCity);
+
+  const handleCityChange = (event: Event) => {
+    const customEvent = event as CustomEvent<string>;
+    setCity(customEvent.detail);
+  };
+
+  window.addEventListener("cityChanged", handleCityChange);
+
+  return () => {
+    window.removeEventListener("cityChanged", handleCityChange);
+  };
+}, []);
 
   const { data: movie, isLoading } = useQuery({
     queryKey: ["movie", id],
@@ -29,34 +52,108 @@ function MoviePage() {
       return data;
     },
   });
+  const { data: shows = [], isLoading: isLoadingShows } = useQuery({
+  queryKey: ["movie-shows", id, city],
+  enabled: !!movie && !!city,
+  queryFn: async () => {
+    // 1. Find theatres in the selected city
+    const { data: theatres, error: theatreError } = await supabase
+      .from("theaters")
+      .select("id,name,city,address")
+      .eq("city", city);
 
-  const { data: shows = [] } = useQuery({
-    queryKey: ["movie-shows", id],
-    enabled: !!movie,
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("shows")
-        .select("id, start_time, base_price, screens(name, theaters(id,name,city,address))")
-        .eq("movie_id", id)
-        .gte("start_time", new Date().toISOString())
-        .order("start_time");
-      if (error) throw error;
-      return data ?? [];
-    },
-  });
+    if (theatreError) throw theatreError;
+
+    const theatreIds = (theatres ?? []).map((theatre) => theatre.id);
+
+    if (theatreIds.length === 0) {
+      return [];
+    }
+
+    // 2. Find screens belonging to those theatres
+    const { data: screens, error: screenError } = await supabase
+      .from("screens")
+      .select("id,name,theater_id")
+      .in("theater_id", theatreIds);
+
+    if (screenError) throw screenError;
+
+    const screenIds = (screens ?? []).map((screen) => screen.id);
+
+    if (screenIds.length === 0) {
+      return [];
+    }
+
+    // 3. Find this movie's future shows on those screens
+    const { data: showData, error: showError } = await supabase
+      .from("shows")
+      .select("id,start_time,base_price,screen_id")
+      .eq("movie_id", id)
+      .in("screen_id", screenIds)
+      .gte("start_time", new Date().toISOString())
+      .order("start_time", { ascending: true });
+
+    if (showError) throw showError;
+
+    // 4. Create lookup maps
+    const screenMap = new Map(
+      (screens ?? []).map((screen) => [screen.id, screen])
+    );
+
+    const theatreMap = new Map(
+      (theatres ?? []).map((theatre) => [theatre.id, theatre])
+    );
+
+    // 5. Attach theatre + screen information
+    return (showData ?? []).map((show) => {
+      const screen = screenMap.get(show.screen_id);
+
+      const theatre = screen
+        ? theatreMap.get(screen.theater_id)
+        : undefined;
+
+      return {
+        ...show,
+        screen,
+        theatre,
+      };
+    });
+  },
+});
 
   // Group shows by theater + date
-  const grouped = new Map<string, { theater: any; dates: Map<string, typeof shows> }>();
-  for (const s of shows) {
-    const t = (s as any).screens?.theaters;
-    if (!t) continue;
-    const tid = t.id as string;
-    if (!grouped.has(tid)) grouped.set(tid, { theater: t, dates: new Map() });
-    const dateKey = new Date(s.start_time).toDateString();
-    const entry = grouped.get(tid)!;
-    if (!entry.dates.has(dateKey)) entry.dates.set(dateKey, []);
-    entry.dates.get(dateKey)!.push(s);
+  const grouped = new Map<
+  string,
+  {
+    theater: any;
+    dates: Map<string, typeof shows>;
   }
+>();
+
+for (const s of shows) {
+  const theater = (s as any).theatre;
+
+  if (!theater) continue;
+
+  const tid = theater.id as string;
+
+  if (!grouped.has(tid)) {
+    grouped.set(tid, {
+      theater,
+      dates: new Map(),
+    });
+  }
+
+  const dateKey = new Date(s.start_time).toDateString();
+
+  const entry = grouped.get(tid)!;
+
+  if (!entry.dates.has(dateKey)) {
+    entry.dates.set(dateKey, []);
+  }
+
+  entry.dates.get(dateKey)!.push(s);
+}
 
   if (isLoading) return (
     <div className="min-h-screen bg-background"><SiteHeader /><div className="container mx-auto px-4 py-20 text-muted-foreground">Loading…</div></div>
@@ -110,10 +207,18 @@ function MoviePage() {
 
       {/* Showtimes */}
       <section className="container mx-auto px-4 py-10">
-        <h2 className="text-2xl font-bold">Showtimes</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Pick a theatre and showtime to continue.</p>
+        <h2 className="text-2xl font-bold">
+  Showtimes in {city}
+</h2>
 
-        {shows.length === 0 ? (
+<p className="mt-1 text-sm text-muted-foreground">
+  Pick a theatre and showtime to continue.
+</p>
+        {isLoadingShows ? (
+  <div className="mt-8 rounded-2xl border border-border bg-card/40 p-10 text-center text-muted-foreground">
+    Loading showtimes in {city}…
+  </div>
+) : shows.length === 0 ? (
           <div className="mt-8 rounded-2xl border border-dashed border-border bg-card/40 p-10 text-center text-muted-foreground">
             No upcoming shows scheduled yet. Check back soon.
           </div>
@@ -152,7 +257,11 @@ function MoviePage() {
             ))}
           </div>
         )}
-      </section>
+            </section>
+
+      <MovieReviews movieId={movie.id} />
+
+<AprioriRecommendations movieTitle={movie.title} />
     </div>
   );
 }

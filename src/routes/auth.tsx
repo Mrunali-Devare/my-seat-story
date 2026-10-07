@@ -1,12 +1,11 @@
 import { createFileRoute, useRouter, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Film } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/auth")({
@@ -22,6 +21,35 @@ export const Route = createFileRoute("/auth")({
 function AuthPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+  const checkSession = async () => {
+    const { data } = await supabase.auth.getSession();
+
+    if (data.session) {
+      router.navigate({ to: "/" });
+    }
+  };
+
+  checkSession();
+
+  const {
+    data: { subscription },
+  } = supabase.auth.onAuthStateChange((event, session) => {
+    if (
+      session &&
+      (event === "SIGNED_IN" ||
+        event === "INITIAL_SESSION" ||
+        event === "TOKEN_REFRESHED")
+    ) {
+      router.navigate({ to: "/" });
+    }
+  });
+
+  return () => {
+    subscription.unsubscribe();
+  };
+}, [router]);
 
   const signIn = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -55,18 +83,25 @@ function AuthPage() {
   };
 
   const google = async () => {
-    setLoading(true);
-    const result = await lovable.auth.signInWithOAuth("google", {
-      redirect_uri: typeof window !== "undefined" ? window.location.origin : undefined,
-    });
-    if (result.error) {
-      setLoading(false);
-      toast.error("Google sign-in failed");
-      return;
-    }
-    if (result.redirected) return;
-    router.navigate({ to: "/" });
-  };
+  setLoading(true);
+
+  const redirectUrl = `${window.location.origin}/auth`;
+
+  console.log("Google OAuth redirect:", redirectUrl);
+
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: redirectUrl,
+    },
+  });
+
+  if (error) {
+    console.error("Google OAuth error:", error);
+    setLoading(false);
+    toast.error(error.message);
+  }
+};
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-hero">
